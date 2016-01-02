@@ -1,40 +1,79 @@
-var path = require('path');
-var api = require('./api')
-var fs = require('fs');
+var Service;
+var Characteristic;
+var chokidar = require("chokidar");
+var debug = require("debug")("FileSensorAccessory");
+var crypto = require("crypto");
 
 module.exports = function(homebridge) {
+    Service = homebridge.hap.Service;
+    Characteristic = homebridge.hap.Characteristic;
 
-  // make the homebridge API object available to accessories and platforms that weren't
-  // designed with it in mind
-  api.homebridge = homebridge;
-
-  // load up all legacy accessories
-  var accessoriesDir = path.join(__dirname, "accessories");
-
-  fs.readdirSync(accessoriesDir).forEach(function(file) {
-    if (file.indexOf(".js") > 0) {
-      var name = file.replace(".js","");
-      homebridge.registerAccessory("homebridge-legacy-plugins", name, function(logger, config) {
-        console.log("Loading legacy accessory " + name);
-        
-        var accessoryModule = require(path.join(accessoriesDir, file));
-        return new accessoryModule.accessory(logger, config);
-      });
-    }
-  });
-  
-  // load up all legacy platforms
-  var platformsDir = path.join(__dirname, "platforms");
-
-  fs.readdirSync(platformsDir).forEach(function(file) {
-    if (file.indexOf(".js") > 0) {
-      var name = file.replace(".js","");
-      homebridge.registerPlatform("homebridge-legacy-plugins", name, function(logger, config) {
-        console.log("Loading legacy platform " + name);
-        
-        var platformModule = require(path.join(platformsDir, file));
-        return new platformModule.platform(logger, config);
-      });
-    }
-  });
+    homebridge.registerAccessory("homebridge-filesensor", "FileSensor", FileSensorAccessory);
 }
+
+function FileSensorAccessory(log, config) {
+  this.log = log;
+
+  // url info
+  this.name = config["name"];
+  this.path = config["path"];
+  this.window_seconds = config["window_seconds"] || 5;
+  this.sensor_type = config["sensor_type"] || "m";
+  this.inverse = config["inverse"] || false;
+
+  if(config["sn"]){
+      this.sn = config["sn"];
+  } else {
+      var shasum = crypto.createHash('sha1');
+      shasum.update(this.path);
+      this.sn = shasum.digest('base64');
+      debug('Computed SN ' + this.sn);
+  }
+}
+
+FileSensorAccessory.prototype = {
+
+  getServices: function() {
+
+    // you can OPTIONALLY create an information service if you wish to override
+    // the default values for things like serial number, model, etc.
+    var informationService = new Service.AccessoryInformation();
+
+    informationService
+      .setCharacteristic(Characteristic.Name, this.name)
+      .setCharacteristic(Characteristic.Manufacturer, "Homebridge")
+      .setCharacteristic(Characteristic.Model, "File Sensor")
+      .setCharacteristic(Characteristic.SerialNumber, this.sn);
+
+    var service, changeAction;
+    if(this.sensor_type === "c"){
+        service = new Service.ContactSensor();
+        changeAction = function(newState){
+            service.getCharacteristic(Characteristic.ContactSensorState)
+                    .setValue(newState ? Characteristic.ContactSensorState.CONTACT_DETECTED : Characteristic.ContactSensorState.CONTACT_NOT_DETECTED);
+        };
+    } else {
+        service = new Service.MotionSensor();
+        changeAction = function(newState){
+            service.getCharacteristic(Characteristic.MotionDetected)
+                    .setValue(newState);
+        };
+    }
+
+    var changeHandler = function(path, stats){
+        var d = new Date();
+        if(d.getTime() - stats.mtime.getTime() <= (this.window_seconds * 1000)){
+            var newState = this.inverse ? false : true;
+            changeAction(newState);
+            if(this.timer !== undefined) clearTimeout(this.timer);
+            this.timer = setTimeout(function(){changeAction(!newState);}, this.window_seconds * 1000);
+        }
+    }.bind(this);
+
+    var watcher = chokidar.watch(this.path, {alwaysStat: true});
+    watcher.on('add', changeHandler);
+    watcher.on('change', changeHandler);
+
+    return [informationService, service];
+  }
+};
