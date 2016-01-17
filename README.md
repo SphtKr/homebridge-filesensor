@@ -1,4 +1,4 @@
-# homebridge-zway
+# homebridge-filesensor
 
 Is a plugin for [Homebridge](/nfarina/homebridge) that uses [Chokidar](/paulmillr/chokidar).
 
